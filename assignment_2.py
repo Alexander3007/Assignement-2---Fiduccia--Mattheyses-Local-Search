@@ -209,6 +209,56 @@ def run_mls(graph_template: dict, num_restarts: int = 25) -> dict:
         "time": total_time
     }
 
+#here we start the ILS part
+
+def perturb_sol(graph: dict, k: int) -> dict:
+    graph = deepcopy(graph)
+    vertices = list(graph.keys())
+    to_flip = random.sample(vertices, k)
+    
+    for i in to_flip:
+        graph[i]["partition"] = 1 - graph[i]["partition"]
+    return graph
+
+def run_ils(graph_template: dict, k: int, num_restarts: int=25) -> dict:
+    
+    start_time = time.time()
+    same_optimum_count = 0
+    
+    graph = assign_partitions(deepcopy(graph_template))
+    current = fm_local_search(graph) #isnt this always the case for ils?
+    best = deepcopy(current)
+    best_cut = calculate_cut_size(current)
+    
+    print(f"[ILS Init] Cut size: {best_cut}")
+    
+    
+    for i in range(num_restarts):
+        perturbed = perturb_sol(current, k)
+        local_optimum = fm_local_search(perturbed)
+        cut = calculate_cut_size(local_optimum)
+        
+        if calculate_cut_size(current) == cut:
+            same_optimum_count += 1
+            
+        if cut < best_cut:
+            best = deepcopy(local_optimum)
+            best_cut = cut
+            current = deepcopy(local_optimum)
+        
+        print(f"[ILS {i+1}/{num_restarts}] Cut size: {cut}")
+    
+    total_time = time.time() - start_time
+    print(f"\nBest cut found (ILS): {best_cut}")
+    print(f"Time elapsed: {total_time:.2f} seconds")
+    print(f"Same local opt found {same_optimum_count}/{num_restarts} times")
+
+    return {
+        "best_graph": best,
+        "cut_size": best_cut,
+        "time": total_time,
+        "same_optimum_count": same_optimum_count
+    }
 
 
 #Test Run
@@ -235,3 +285,16 @@ if __name__ == "__main__":
 
     print("\nFinal partition sizes:", count_partitions(mls_result["best_graph"]))
     print("Final cut size:", mls_result["cut_size"])
+
+    #15 is k here,
+    ils_result = run_ils(parsed_graph, 15, num_restarts = 25)
+    #we could also do this, I have commented it for now
+    #ils_result= {}
+    
+    #for k in [1, 2, 5, 10, 15, 20]:
+    #    print("\nRunning ILS with k = {k}")
+    #    current_result = run_ils(parsed_graph, k=k, num_restarts=25)
+    #    ils_result[k] = current_result
+    
+    print("\nFinal partition sizes:", count_partitions(ils_result["best_graph"]))
+    print("Final cut size:", ils_result["cut_size"])
