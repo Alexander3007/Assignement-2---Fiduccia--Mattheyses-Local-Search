@@ -98,6 +98,17 @@ class Vertex:
         self.bucket_index = None
 
 def fm_local_search(graph: dict) -> dict:
+    class Vertex:
+        def __init__(self, vid, neighbors, partition):
+            self.id = vid
+            self.neighbors = neighbors
+            self.partition = partition
+            self.gain = 0
+            self.locked = False
+            self.bucket_prev = None
+            self.bucket_next = None
+            self.bucket_index = None
+
     vertices = {}
     for vid, data in graph.items():
         vertices[vid] = Vertex(vid, data["neighbors"], data["partition"])
@@ -136,23 +147,44 @@ def fm_local_search(graph: dict) -> dict:
         e = len(v.neighbors) - i
         insert(v, e - i)
 
+    partition_count = {0: 0, 1: 0}
+    for v in vertices.values():
+        partition_count[v.partition] += 1
+
     moves = []
     cumulative_gain = 0
     locked = set()
+    total_vertices = len(vertices)
+    target_partition_size = total_vertices // 2
 
     for _ in range(len(vertices)):
         selected = None
+
         for b in range(num_buckets - 1, -1, -1):
-            if buckets[b] is not None:
-                selected = buckets[b]
+            candidate = buckets[b]
+            while candidate:
+                pid = candidate.partition
+                if partition_count[pid] > target_partition_size:
+                    selected = candidate
+                    break
+                candidate = candidate.bucket_next
+            if selected:
                 break
+
         if selected is None:
             break
+
         remove(selected)
         selected.locked = True
         locked.add(selected.id)
         cumulative_gain += selected.gain
         moves.append((selected.id, selected.gain, cumulative_gain))
+
+        # Update partition count before flipping
+        old_partition = selected.partition
+        new_partition = 1 - old_partition
+        partition_count[old_partition] -= 1
+        partition_count[new_partition] += 1
 
         for nb in selected.neighbors:
             if nb in locked:
@@ -161,7 +193,7 @@ def fm_local_search(graph: dict) -> dict:
             delta = 2 if neighbor.partition == selected.partition else -2
             update_gain(neighbor, delta)
 
-        selected.partition = 1 - selected.partition
+        selected.partition = new_partition
 
     best_gain = -float('inf')
     best_index = -1
@@ -172,14 +204,20 @@ def fm_local_search(graph: dict) -> dict:
 
     for i in range(len(moves) - 1, best_index, -1):
         vid, _, _ = moves[i]
-        vertices[vid].partition = 1 - vertices[vid].partition
+        v = vertices[vid]
+        old_partition = v.partition
+        new_partition = 1 - old_partition
+        v.partition = new_partition
+        partition_count[old_partition] -= 1
+        partition_count[new_partition] += 1
 
     new_graph = deepcopy(graph)
     for vid, v in vertices.items():
         new_graph[vid]["partition"] = v.partition
     return new_graph
 
-def run_mls(graph_template: dict, num_restarts: int = 25) -> dict:
+
+def run_mls(graph_template: dict, num_restarts: int = 10000) -> dict:
     best_graph = None
     best_cut = float('inf')
     start_time = time.time()
@@ -213,11 +251,20 @@ def run_mls(graph_template: dict, num_restarts: int = 25) -> dict:
 
 def perturb_sol(graph: dict, k: int) -> dict:
     graph = deepcopy(graph)
-    vertices = list(graph.keys())
-    to_flip = random.sample(vertices, k)
-    
-    for i in to_flip:
-        graph[i]["partition"] = 1 - graph[i]["partition"]
+    partition_0 = [v for v in graph if graph[v]["partition"] == 0]
+    partition_1 = [v for v in graph if graph[v]["partition"] == 1]
+
+    k_half = k // 2
+    # Ensure there are enough nodes to flip
+    k0 = min(k_half, len(partition_0))
+    k1 = min(k - k0, len(partition_1))
+
+    to_flip_0 = random.sample(partition_0, k0)
+    to_flip_1 = random.sample(partition_1, k1)
+
+    for v in to_flip_0 + to_flip_1:
+        graph[v]["partition"] = 1 - graph[v]["partition"]
+
     return graph
 
 def run_ils(graph_template: dict, k: int, num_restarts: int=25) -> dict:
@@ -289,7 +336,7 @@ if __name__ == "__main__":
     #15 is k here,
     ils_result = run_ils(parsed_graph, 15, num_restarts = 25)
     #we could also do this, I have commented it for now
-    #ils_result= {}
+    
     
     #for k in [1, 2, 5, 10, 15, 20]:
     #    print("\nRunning ILS with k = {k}")
@@ -298,3 +345,10 @@ if __name__ == "__main__":
     
     print("\nFinal partition sizes:", count_partitions(ils_result["best_graph"]))
     print("Final cut size:", ils_result["cut_size"])
+
+    # Time a single FM pass
+    graph_for_fm = assign_partitions(deepcopy(parsed_graph))
+    start_fm_time = time.time()
+    _ = fm_local_search(graph_for_fm)
+    end_fm_time = time.time()
+    print(f"\nOne FM pass took {end_fm_time - start_fm_time:.5f} seconds")
