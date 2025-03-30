@@ -2,6 +2,8 @@ import numpy as np
 import random
 from copy import deepcopy
 import time
+import pandas as pd
+import matplotlib.pyplot as plt
 
 # Load and initialize graph
 def load_graph(filename: str) -> dict:
@@ -217,26 +219,25 @@ def fm_local_search(graph: dict) -> dict:
     return new_graph
 
 
-def run_mls(graph_template: dict, num_restarts: int = 10000) -> dict:
+def run_mls(graph_template: dict, num_restarts: int = 10000, time_limit: float = None) -> dict:
     best_graph = None
     best_cut = float('inf')
     start_time = time.time()
+    fm_calls = 0
 
     for i in range(num_restarts):
-        # Deep copy and random partitioning
+        if time_limit is not None and time.time() - start_time >= time_limit:
+            break
         graph = deepcopy(graph_template)
         assign_partitions(graph)
-
-        # Local search
         improved_graph = fm_local_search(graph)
+        fm_calls += 1
         cut = calculate_cut_size(improved_graph)
-
         if cut < best_cut:
             best_cut = cut
             best_graph = improved_graph
-
-        print(f"[MLS {i+1}/{num_restarts}] Cut size: {cut}")
-
+        #print(f"[MLS {i+1}/{num_restarts}] Cut size: {cut}")
+        
     total_time = time.time() - start_time
     print(f"\nBest cut found: {best_cut}")
     print(f"Time elapsed: {total_time:.2f} seconds")
@@ -244,8 +245,10 @@ def run_mls(graph_template: dict, num_restarts: int = 10000) -> dict:
     return {
         "best_graph": best_graph,
         "cut_size": best_cut,
-        "time": total_time
+        "time": total_time,
+        "fm_calls": fm_calls
     }
+
 
 #here we start the ILS part
 
@@ -267,45 +270,142 @@ def perturb_sol(graph: dict, k: int) -> dict:
 
     return graph
 
-def run_ils(graph_template: dict, k: int, num_restarts: int=25) -> dict:
-    
+def run_ils(graph_template: dict, k: int = 15, num_restarts: int = 25, time_limit: float = None) -> dict:
     start_time = time.time()
     same_optimum_count = 0
     
     graph = assign_partitions(deepcopy(graph_template))
-    current = fm_local_search(graph) #isnt this always the case for ils?
+    current = fm_local_search(graph)
     best = deepcopy(current)
     best_cut = calculate_cut_size(current)
-    
-    print(f"[ILS Init] Cut size: {best_cut}")
-    
+    fm_calls = 1
+    #print(f"[ILS Init] Cut size: {best_cut}")
     
     for i in range(num_restarts):
+        if time_limit is not None and time.time() - start_time >= time_limit:
+            break
         perturbed = perturb_sol(current, k)
         local_optimum = fm_local_search(perturbed)
+        fm_calls += 1
         cut = calculate_cut_size(local_optimum)
-        
         if calculate_cut_size(current) == cut:
             same_optimum_count += 1
-            
         if cut < best_cut:
             best = deepcopy(local_optimum)
             best_cut = cut
             current = deepcopy(local_optimum)
+        #print(f"[ILS {i+1}/{num_restarts}] Cut size: {cut}")
         
-        print(f"[ILS {i+1}/{num_restarts}] Cut size: {cut}")
-    
     total_time = time.time() - start_time
     print(f"\nBest cut found (ILS): {best_cut}")
     print(f"Time elapsed: {total_time:.2f} seconds")
     print(f"Same local opt found {same_optimum_count}/{num_restarts} times")
-
+    
     return {
         "best_graph": best,
         "cut_size": best_cut,
         "time": total_time,
-        "same_optimum_count": same_optimum_count
-    }
+        "same_optimum_count": same_optimum_count,
+        "fm_calls": fm_calls
+        }
+
+# GLS
+def run_gls(graph_template: dict, population_size: int = 50, max_iterations: int = 10000, time_limit: float = None) -> dict:
+    start_time = time.time()
+    population = []
+    fm_calls = 0
+    for i in range(population_size):
+        graph = deepcopy(graph_template)
+        assign_partitions(graph)
+        local_optimum = fm_local_search(graph)
+        fm_calls += 1
+        cut = calculate_cut_size(local_optimum)
+        population.append({"graph": local_optimum, "cut": cut})
+    
+    def select_parents(pop):
+        idxs = np.random.choice(len(pop), size=2, replace=False)
+        return pop[idxs[0]], pop[idxs[1]]
+    
+    def get_worst(pop):
+        return max(pop, key=lambda ind: ind["cut"])
+    
+    iterations = 0
+    while iterations < max_iterations:
+        if time_limit is not None and time.time() - start_time >= time_limit:
+            break
+        
+        parent1_ind, parent2_ind = select_parents(population)
+        parent1_str = solution_to_binary_string(parent1_ind["graph"])
+        parent2_str = solution_to_binary_string(parent2_ind["graph"])
+        child_str = recombine_parents(parent1_str, parent2_str)
+        child_graph = binary_string_to_solution(child_str, graph_template)
+        child_local = fm_local_search(child_graph)
+        fm_calls += 1
+        child_cut = calculate_cut_size(child_local)
+        worst = get_worst(population)
+        if child_cut <= worst["cut"]:
+            worst_index = population.index(worst)
+            population[worst_index] = {"graph": child_local, "cut": child_cut}
+        iterations += 1
+
+    total_time = time.time() - start_time
+    best_individual = min(population, key=lambda ind: ind["cut"])
+    return {"best_graph": best_individual["graph"], "cut_size": best_individual["cut"], "time": total_time, "fm_calls": fm_calls}
+
+# GLS with ILS combined
+def run_gls_ils(graph_template: dict, population_size: int = 50, max_iterations: int = 10000,
+                ils_frequency: int = 50, perturbation_size: int = 15, time_limit: float = None) -> dict:
+    start_time = time.time()
+    population = []
+    fm_calls = 0
+    for i in range(population_size):
+        graph = deepcopy(graph_template)
+        assign_partitions(graph)
+        local_optimum = fm_local_search(graph)
+        fm_calls += 1
+        cut = calculate_cut_size(local_optimum)
+        population.append({"graph": local_optimum, "cut": cut})
+    
+    def select_parents(pop):
+        idxs = np.random.choice(len(pop), size=2, replace=False)
+        return pop[idxs[0]], pop[idxs[1]]
+    
+    def get_worst(pop):
+        return max(pop, key=lambda ind: ind["cut"])
+    
+    iterations = 0
+    while iterations < max_iterations:
+        if time_limit is not None and time.time() - start_time >= time_limit:
+            break
+
+        if iterations % ils_frequency == 0:
+            idx = np.random.randint(0, population_size)
+            original = population[idx]
+            perturbed_graph = perturb_sol(original["graph"], perturbation_size)
+            ils_solution = fm_local_search(perturbed_graph)
+            fm_calls += 1
+            ils_cut = calculate_cut_size(ils_solution)
+            if ils_cut <= original["cut"]:
+                population[idx] = {"graph": ils_solution, "cut": ils_cut}
+        else:
+            parent1_ind, parent2_ind = select_parents(population)
+            parent1_str = solution_to_binary_string(parent1_ind["graph"])
+            parent2_str = solution_to_binary_string(parent2_ind["graph"])
+            child_str = recombine_parents(parent1_str, parent2_str)
+            child_graph = binary_string_to_solution(child_str, graph_template)
+            child_local = fm_local_search(child_graph)
+            fm_calls += 1
+            child_cut = calculate_cut_size(child_local)
+            worst = get_worst(population)
+            if child_cut <= worst["cut"]:
+                worst_index = population.index(worst)
+                population[worst_index] = {"graph": child_local, "cut": child_cut}
+        iterations += 1
+
+    total_time = time.time() - start_time
+    best_individual = min(population, key=lambda ind: ind["cut"])
+    return {"best_graph": best_individual["graph"], "cut_size": best_individual["cut"], "time": total_time, "fm_calls": fm_calls}
+
 
 
 #Test Run
@@ -346,9 +446,107 @@ if __name__ == "__main__":
     print("\nFinal partition sizes:", count_partitions(ils_result["best_graph"]))
     print("Final cut size:", ils_result["cut_size"])
 
+    gls_result = run_gls(parsed_graph, 50)
+
+    print("\nFinal partition sizes:", count_partitions(gls_result["best_graph"]))
+    print("Final cut size:", gls_result["cut_size"])
+
     # Time a single FM pass
     graph_for_fm = assign_partitions(deepcopy(parsed_graph))
     start_fm_time = time.time()
     _ = fm_local_search(graph_for_fm)
     end_fm_time = time.time()
     print(f"\nOne FM pass took {end_fm_time - start_fm_time:.5f} seconds")
+
+# ========= Experiment Wrappers =========
+
+def experiment_fm_passes(graph_template, algorithm_func, fm_limit=10000, runs=25, **kwargs):
+    """
+    Run a single run of the given algorithm that executes approximately fm_limit FM passes.
+    """
+    results = []
+    for i in range(runs):
+        start_time = time.time()
+        result = algorithm_func(graph_template, time_limit=None, **kwargs)  # run until num_restarts or iterations complete
+        elapsed = time.time() - start_time
+        results.append({
+            "run": i+1,
+            "cut_size": result['cut_size'],
+            "time": elapsed,
+            "fm_calls": result.get('fm_calls', fm_limit)
+        })
+        print(f"[FM Run {i+1}] Cut: {result['cut_size']}, FM passes: {result.get('fm_calls', fm_limit)}, Time: {elapsed:.2f}s")
+    return pd.DataFrame(results)
+
+def experiment_time_limit(graph_template, algorithm_func, time_limit, runs=25, **kwargs):
+    """
+    Run a single run of the given algorithm with a specified time limit.
+    The algorithm will finish its current FM pass before stopping.
+    """
+    results = []
+    for i in range(runs):
+        start_time = time.time()
+        result = algorithm_func(graph_template, time_limit=time_limit, **kwargs)
+        elapsed = time.time() - start_time
+        results.append({
+            "run": i+1,
+            "cut_size": result['cut_size'],
+            "time": elapsed,
+            "fm_calls": result.get('fm_calls', None)
+        })
+        print(f"[Time Run {i+1}] Cut: {result['cut_size']}, FM passes: {result.get('fm_calls', 'N/A')}, Time: {elapsed:.2f}s")
+    return pd.DataFrame(results)
+
+# ========= Running the Experiments =========
+
+# First, measure the time for a single MLS run that performs ~10,000 FM passes.
+# (We assume run_mls is configured with num_restarts = 10000.)
+num_restarts_mls = 10000  # adjust as needed to yield ~10,000 FM passes
+print("Measuring MLS run time for 10,000 FM passes...")
+mls_single = run_mls(parsed_graph, num_restarts=num_restarts_mls)
+time_budget = mls_single["time"]
+print(f"MLS run time: {time_budget:.2f} seconds\n")
+
+# Experiment (a): Fixed 10,000 FM passes (each algorithm run is configured to perform ~10,000 FM passes)
+mls_fm_df     = experiment_fm_passes(parsed_graph, run_mls, fm_limit=10000, runs=25, num_restarts=num_restarts_mls)
+ils_fm_df     = experiment_fm_passes(parsed_graph, run_ils, fm_limit=10000, runs=25, k=15, num_restarts=num_restarts_mls)
+gls_fm_df     = experiment_fm_passes(parsed_graph, run_gls, fm_limit=10000, runs=25, population_size=50, max_iterations=10000)
+glsils_fm_df  = experiment_fm_passes(parsed_graph, run_gls_ils, fm_limit=10000, runs=25, population_size=50, max_iterations=10000, ils_frequency=50, perturbation_size=15)
+
+# Plot boxplot for FM passes experiment
+plt.figure(figsize=(10, 5))
+data_fm = [mls_fm_df["cut_size"], ils_fm_df["cut_size"], gls_fm_df["cut_size"], glsils_fm_df["cut_size"]]
+plt.boxplot(data_fm, labels=["MLS", "ILS", "GLS", "Hybrid GLS/ILS"])
+plt.ylabel("Cut Size")
+plt.title("Cut Size Distribution (Fixed 10,000 FM Passes)")
+plt.show()
+
+# Experiment (b): Fixed run time (each algorithm gets the same time budget as measured from MLS)
+print(f"\nUsing a time budget of {time_budget:.2f} seconds (MLS run time) for the time experiments.\n")
+mls_time_df    = experiment_time_limit(parsed_graph, run_mls, time_limit=time_budget, runs=25, num_restarts=num_restarts_mls)
+ils_time_df    = experiment_time_limit(parsed_graph, run_ils, time_limit=time_budget, runs=25, k=15, num_restarts=num_restarts_mls)
+gls_time_df    = experiment_time_limit(parsed_graph, run_gls, time_limit=time_budget, runs=25, population_size=50, max_iterations=10000)
+glsils_time_df = experiment_time_limit(parsed_graph, run_gls_ils, time_limit=time_budget, runs=25, population_size=50, max_iterations=10000, ils_frequency=50, perturbation_size=15)
+
+# Plot boxplot for time experiments
+plt.figure(figsize=(10, 5))
+data_time = [mls_time_df["cut_size"], ils_time_df["cut_size"], gls_time_df["cut_size"], glsils_time_df["cut_size"]]
+plt.boxplot(data_time, labels=["MLS", "ILS", "GLS", "Hybrid GLS/ILS"])
+plt.ylabel("Cut Size")
+plt.title("Cut Size Distribution (Fixed Run Time from MLS)")
+plt.show()
+
+# Optionally, tabulate the mean cut sizes:
+print("FM Passes Experiment Means:")
+print("MLS:", mls_fm_df["cut_size"].mean())
+print("ILS:", ils_fm_df["cut_size"].mean())
+print("GLS:", gls_fm_df["cut_size"].mean())
+print("Hybrid GLS/ILS:", glsils_fm_df["cut_size"].mean())
+
+print("\nTime Experiment Means:")
+print("MLS:", mls_time_df["cut_size"].mean())
+print("ILS:", ils_time_df["cut_size"].mean())
+print("GLS:", gls_time_df["cut_size"].mean())
+print("Hybrid GLS/ILS:", glsils_time_df["cut_size"].mean())
+
+    
